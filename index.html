@@ -398,7 +398,7 @@ main.no-sidebar sidebar{opacity:0;pointer-events:none;overflow:hidden}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px">
       <div>
         <div style="font-size:13px;font-weight:700;color:var(--txt)">SO → MO Linkage</div>
-        <div style="font-size:10px;color:var(--mut);margin-top:2px">Each sales order matched to its production orders · <span id="link-match-note" style="color:#60a5fa"></span></div>
+        <div style="font-size:10px;color:var(--mut);margin-top:2px">Each production order matched to its sales order via Jira "Relates" link · <span id="link-match-note" style="color:#60a5fa"></span></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input id="link-search" placeholder="Search customer…" oninput="renderLinkTab()"
@@ -1860,9 +1860,9 @@ function fmtSoDate(iso) {
 }
 
 function getSoForMo(moKey) {
-  // Returns the linked SO object for a given MOM- key, or null
+  // Find the SO that has this MO key in its outward links
   if (!linkedData) return null;
-  const match = linkedData.find(d => d.pos.some(p => p.key === moKey));
+  const match = linkedData.find(d => d.moKeys && d.moKeys.includes(moKey));
   return match ? match.so : null;
 }
 
@@ -2245,55 +2245,15 @@ function renderSalesOrders() {
 // ── SO-MO Linkage data ────────────────────────────────────────────
 // SO-MO linking — built from Jira "relates" links in CSV exports (no fuzzy matching)
 function buildLinkedData() {
+  // SO-centric: each SO is a row; linked MOs come from "Outward issue link (Relates)" columns
   const buildMap = {};
   builds.forEach(b => { buildMap[b.key] = b; });
 
-  // Collect all MO keys linked to each SO — from both directions
-  const soToMOs = {}; // DEL-key → Set of MOM-keys
-
-  // From MO builds: each build has linkedSO array from "Inward issue link (Relates)"
-  builds.forEach(b => {
-    (b.linkedSO || []).forEach(soKey => {
-      if (!soToMOs[soKey]) soToMOs[soKey] = new Set();
-      soToMOs[soKey].add(b.key);
-    });
-  });
-
-  // From SOs: each SO has linkedMOs array from "Outward issue link (Relates)"
-  salesOrders.forEach(s => {
-    (s.linkedMOs || []).forEach(moKey => {
-      if (!soToMOs[s.key]) soToMOs[s.key] = new Set();
-      soToMOs[s.key].add(moKey);
-    });
-  });
-
-  // Build linkedData in the expected format
   return salesOrders.map(so => {
-    const moKeys = soToMOs[so.key] ? [...soToMOs[so.key]].sort((a,b) => {
-      const na = parseInt(a.replace('MOM-',''));
-      const nb = parseInt(b.replace('MOM-',''));
-      return na - nb;
-    }) : [];
-
-    const pos = moKeys.map(moKey => {
-      const b = buildMap[moKey];
-      return b ? {
-        key: b.key,
-        summary: b.name,
-        status: b.jiraStatus,
-        amrType: b.amrType,
-        dueDate: b.dueDate,
-        stage: b.stage,
-      } : { key: moKey, summary: moKey, status: '', amrType: '', dueDate: '', stage: '' };
-    });
-
-    const linked = moKeys.length > 0;
-    return {
-      so,
-      pos,
-      matchConfidence: linked ? 'linked' : 'none',
-      matchScore: linked ? 1 : 0,
-    };
+    // linkedMOs was populated from all "Outward issue link (Relates)" columns in SO CSV
+    const moKeys = (so.linkedMOs || []).filter(k => k.startsWith('MOM-'));
+    const mos = moKeys.map(key => buildMap[key] || null); // null if MO not loaded
+    return { so, moKeys, mos, linked: moKeys.length > 0 };
   });
 }
 
@@ -2305,129 +2265,164 @@ const CONF_COLOR = {linked:'#34d399',high:'#34d399',medium:'#34d399',none:'#f871
 
 function renderLinkTab() {
   if (!linkedData) { linkedData = buildLinkedData(); }
-  const search  = (document.getElementById('link-search')?.value || '').toLowerCase();
-  const confF   = document.getElementById('link-conf-filter')?.value || '';
-  const soStatF = document.getElementById('link-so-status')?.value || '';
-  const poStatF = document.getElementById('link-po-status')?.value || '';
 
+  const search  = (document.getElementById('link-search')?.value   || '').toLowerCase();
+  const confF   = document.getElementById('link-conf-filter')?.value || '';
+  const soStatF = document.getElementById('link-so-status')?.value  || '';
+  const moStatF = document.getElementById('link-po-status')?.value  || '';
+
+  // Populate SO status filter once
   const soSel = document.getElementById('link-so-status');
   if (soSel && soSel.options.length === 1) {
     [...new Set(linkedData.map(d => d.so.status).filter(Boolean))].sort()
       .forEach(s => soSel.appendChild(Object.assign(document.createElement('option'), {value:s,textContent:s})));
   }
-  const poSel = document.getElementById('link-po-status');
-  if (poSel && poSel.options.length === 1) {
-    [...new Set(linkedData.flatMap(d => d.pos.map(p => p.status)).filter(Boolean))].sort()
-      .forEach(s => poSel.appendChild(Object.assign(document.createElement('option'), {value:s,textContent:s})));
+  // Populate MO status filter once
+  const moSel = document.getElementById('link-po-status');
+  if (moSel && moSel.options.length === 1) {
+    [...new Set(linkedData.flatMap(d => d.mos.filter(Boolean).map(m => m.jiraStatus)).filter(Boolean))].sort()
+      .forEach(s => moSel.appendChild(Object.assign(document.createElement('option'), {value:s,textContent:s})));
   }
 
   const filtered = linkedData.filter(d => {
-    const so = d.so;
-    if (search && !so.summary.toLowerCase().includes(search) && !so.key.toLowerCase().includes(search) &&
-        !d.pos.some(p => p.summary.toLowerCase().includes(search) || p.key.toLowerCase().includes(search))) return false;
-    if (confF && d.matchConfidence !== confF) return false;
-    if (soStatF && so.status !== soStatF) return false;
-    if (poStatF && !d.pos.some(p => p.status === poStatF)) return false;
+    if (confF === 'linked' && !d.linked) return false;
+    if (confF === 'none'   &&  d.linked) return false;
+    if (soStatF && d.so.status !== soStatF) return false;
+    if (moStatF && !d.mos.filter(Boolean).some(m => m.jiraStatus === moStatF)) return false;
+    if (search) {
+      const soMatch = d.so.summary.toLowerCase().includes(search) || d.so.key.toLowerCase().includes(search);
+      const moMatch = d.mos.filter(Boolean).some(m => m.name.toLowerCase().includes(search) || m.key.toLowerCase().includes(search));
+      const keyMatch = d.moKeys.some(k => k.toLowerCase().includes(search));
+      if (!soMatch && !moMatch && !keyMatch) return false;
+    }
     return true;
   });
 
   // Summary bar
   const total  = linkedData.length;
-  const linked = linkedData.filter(d => d.matchConfidence === 'linked').length;
-  const none   = linkedData.filter(d => d.matchConfidence === 'none').length;
-  const totPOs = linkedData.reduce((s, d) => s + d.pos.length, 0);
-  const note   = document.getElementById('link-match-note');
-  if (note) note.textContent = `${linked} linked · ${none} unlinked · ${totPOs} total MOs`;
+  const linked = linkedData.filter(d => d.linked).length;
+  const noLink = linkedData.filter(d => !d.linked).length;
+  const totalMOs = linkedData.reduce((s,d) => s + d.moKeys.length, 0);
+  const note = document.getElementById('link-match-note');
+  if (note) note.textContent = `${linked} SOs linked · ${noLink} SOs with no MO · ${totalMOs} total MOs`;
   const bar = document.getElementById('link-summary-bar');
   if (bar) bar.innerHTML = [
-    {l:'Total SOs',  v:total,  c:'#60a5fa'},
-    {l:'MOs Linked', v:totPOs, c:'#a78bfa'},
-    {l:'Linked SOs', v:linked, c:'#34d399'},
-    {l:'No Link Yet',v:none,   c:'#f87171'},
-  ].map(p=>`<div style="background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px;min-width:90px">
+    {l:'Total SOs',    v:total,    c:'#60a5fa'},
+    {l:'Total MOs',    v:totalMOs, c:'#a78bfa'},
+    {l:'Linked SOs',   v:linked,   c:'#34d399'},
+    {l:'No MO Found',  v:noLink,   c:'#f87171'},
+  ].map(p => `<div style="background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:10px 16px;display:flex;flex-direction:column;gap:2px;min-width:100px">
     <div style="font-size:20px;font-weight:800;color:${p.c}">${p.v}</div>
     <div style="font-size:10px;color:var(--mut);font-weight:600;letter-spacing:.5px">${p.l}</div>
   </div>`).join('');
 
-  // Rebuild the entire table to bypass any HTML parser issues with the static DOM
-  const tableWrap = document.getElementById('link-table-wrap');
-  if (tableWrap) {
-    tableWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead><tr style="background:var(--s1);border-bottom:2px solid var(--bdr)">
-        <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">Sales Order</th>
-        <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">SO Status</th>
-        <th style="padding:10px 14px;text-align:center;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase">Qty</th>
-        <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">AMR Type</th>
-        <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">Production Orders (MOM-)</th>
-        <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">MO Status</th>
-        <th style="padding:10px 14px;text-align:center;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase">Match</th>
-      </tr></thead>
-      <tbody id="link-table-body"></tbody>
-    </table>`;
-  }
-  const tbody = document.getElementById('link-table-body');
-  const empty = document.getElementById('link-empty');
-  if (!filtered.length) { tbody.innerHTML=''; empty.style.display=''; return; }
-  empty.style.display = 'none';
+  const LINK_ARCHIVED = new Set(['Rejected','Dispatch','commissioning','Handover Done']);
+  const active   = filtered.filter(d => !LINK_ARCHIVED.has(d.so.status));
+  const archived = filtered.filter(d =>  LINK_ARCHIVED.has(d.so.status));
 
-  const poBadge = st => {
-    const c = PO_STATUS_COLORS[st] || '#94a3b8';
-    return `<span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;color:${c};background:${c}18;border:1px solid ${c}40">${st||'—'}</span>`;
+  // Rebuild table with two tbodies
+  const tableWrap = document.getElementById('link-table-wrap');
+  if (tableWrap) tableWrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr style="background:var(--s1);border-bottom:2px solid var(--bdr)">
+      <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">Sales Order</th>
+      <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">SO Status</th>
+      <th style="padding:10px 14px;text-align:center;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase">Qty</th>
+      <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">AMR Type</th>
+      <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">Production Orders (MOM-)</th>
+      <th style="padding:10px 14px;text-align:left;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap">MO Status</th>
+      <th style="padding:10px 14px;text-align:center;font-weight:700;color:var(--mut);font-size:10px;letter-spacing:.8px;text-transform:uppercase">Link</th>
+    </tr></thead>
+    <tbody id="link-section-active"></tbody>
+    <tbody id="link-table-body"></tbody>
+    <tbody id="link-section-archived"></tbody>
+    <tbody id="link-table-body-archived"></tbody>
+  </table>`;
+
+  const empty = document.getElementById('link-empty');
+  if (!filtered.length) { if(empty) empty.style.display=''; return; }
+  if (empty) empty.style.display = 'none';
+
+  const sc = s => SO_STATUS_COLORS[s] || '#94a3b8';
+  const mc = s => PO_STATUS_COLORS[s] || '#94a3b8';
+  const bd = 'border-bottom:1px solid rgba(35,42,53,.5)';
+  const br = 'border-right:1px solid var(--bdr)';
+
+  const sectionHeader = (label, count, color) => `<tr>
+    <td colspan="7" style="padding:8px 14px;background:${color}10;border-top:1px solid ${color}30;border-bottom:1px solid ${color}30">
+      <span style="font-size:10px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:.8px">${label}</span>
+      <span style="margin-left:8px;font-size:10px;color:var(--mut)">${count} order${count!==1?'s':''}</span>
+    </td>
+  </tr>`;
+
+  const buildRows = list => {
+    let rows = '';
+    for (const d of list) {
+      const so = d.so;
+      const soColor = sc(so.status);
+      const rowspan = Math.max(d.moKeys.length, 1);
+
+      const soCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;${br};${bd}">
+        <div style="font-weight:600;color:var(--txt);font-size:12px;line-height:1.4">${so.summary}</div>
+        <div style="font-size:10px;color:var(--mut);margin-top:3px">${so.key}${so.location?' · '+so.location:''}</div>
+      </td>`;
+      const soStatCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;${br};${bd}">
+        <span style="display:inline-block;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;color:${soColor};background:${soColor}18;border:1px solid ${soColor}40">${so.status||'—'}</span>
+      </td>`;
+      const soQtyCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;text-align:center;font-weight:800;color:var(--txt);font-size:14px;${br};${bd}">
+        ${so.quantity ? Math.round(parseFloat(so.quantity)) : '—'}
+      </td>`;
+      const soAmrCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;color:var(--mut);font-size:11px;${br};${bd}">
+        ${so.amrType||'—'}
+      </td>`;
+
+      if (!d.moKeys.length) {
+        const noLinkCell = `<td style="padding:10px 14px;color:var(--mut);font-size:11px;font-style:italic;${br};${bd}">Cannot find associated MO</td>
+          <td style="padding:10px 14px;${br};${bd}">—</td>
+          <td style="padding:10px 14px;text-align:center;${bd}"><span style="font-size:10px;font-weight:700;color:#f87171">✗ No link</span></td>`;
+        rows += `<tr onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">${soCell}${soStatCell}${soQtyCell}${soAmrCell}${noLinkCell}</tr>`;
+      } else {
+        d.moKeys.forEach((moKey, idx) => {
+          const mo = d.mos[idx];
+          let moNameCell, moStatCell;
+          if (mo) {
+            const moC = mc(mo.jiraStatus);
+            moNameCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}">
+              <div style="font-weight:600;color:var(--txt);font-size:12px">${mo.name}</div>
+              <div style="font-size:10px;color:#60a5fa;margin-top:2px">${mo.key}${mo.vehicleSerial?' · SN:'+mo.vehicleSerial:''}</div>
+            </td>`;
+            moStatCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}">
+              <span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;color:${moC};background:${moC}18;border:1px solid ${moC}40">${mo.jiraStatus||'—'}</span>
+            </td>`;
+          } else {
+            moNameCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}">
+              <div style="font-size:11px;color:#f59e0b;font-weight:600">${moKey}</div>
+              <div style="font-size:10px;color:var(--mut);margin-top:2px">Not in loaded MOs</div>
+            </td>`;
+            moStatCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}"><span style="color:var(--mut)">—</span></td>`;
+          }
+          const confCell = `<td style="padding:10px 14px;vertical-align:middle;text-align:center;${bd}">
+            <span style="font-size:10px;font-weight:700;color:#34d399">✓ Linked</span>
+          </td>`;
+          if (idx === 0) {
+            rows += `<tr onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">${soCell}${soStatCell}${soQtyCell}${soAmrCell}${moNameCell}${moStatCell}${confCell}</tr>`;
+          } else {
+            rows += `<tr onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">${moNameCell}${moStatCell}${confCell}</tr>`;
+          }
+        });
+      }
+    }
+    return rows;
   };
 
-  let rows = '';
-  for (const d of filtered) {
-    const so = d.so;
-    const pos = d.pos;
-    const cc = CONF_COLOR[d.matchConfidence];
-    const cl = CONF_LABEL[d.matchConfidence];
-    const rowspan = Math.max(pos.length, 1);
-    const sc = SO_STATUS_COLORS[so.status] || '#94a3b8';
-    const bd = 'border-bottom:1px solid rgba(35,42,53,.6)';
-    const br = 'border-right:1px solid var(--bdr)';
+  const secActive   = document.getElementById('link-section-active');
+  const bodyActive  = document.getElementById('link-table-body');
+  const secArchived = document.getElementById('link-section-archived');
+  const bodyArchived= document.getElementById('link-table-body-archived');
 
-    const soCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;${br};${bd}">
-      <div style="font-weight:600;color:var(--txt);font-size:12px;line-height:1.4;max-width:220px">${so.summary}</div>
-      <div style="font-size:10px;color:var(--mut);margin-top:3px">${so.key}${so.location?' · '+so.location:''}</div>
-    </td>`;
-    const soStatCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;${br};${bd}">
-      <span style="display:inline-block;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:700;color:${sc};background:${sc}18;border:1px solid ${sc}40">${so.status||'—'}</span>
-    </td>`;
-    const soQtyCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;text-align:center;font-weight:800;color:var(--txt);font-size:14px;${br};${bd}">
-      ${so.quantity?Math.round(parseFloat(so.quantity)):'—'}
-    </td>`;
-    const soAmrCell = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;color:var(--mut);font-size:11px;${br};${bd}">
-      ${so.amrType||'—'}
-    </td>`;
-    const confCell  = `<td rowspan="${rowspan}" style="padding:10px 14px;vertical-align:top;text-align:center;${bd}">
-      <span style="font-size:10px;font-weight:700;color:${cc}">${cl}</span>
-      ${d.matchScore>0?`<div style="font-size:9px;color:var(--mut);margin-top:2px">${Math.round(d.matchScore*100)}%</div>`:''}</td>`;
-
-    if (!pos.length) {
-      rows += `<tr>
-        ${soCell}${soStatCell}${soQtyCell}${soAmrCell}
-        <td style="padding:10px 14px;color:var(--mut);font-size:11px;font-style:italic;${br};${bd}">No MO created yet</td>
-        <td style="padding:10px 14px;${br};${bd}">—</td>
-        ${confCell}
-      </tr>`;
-    } else {
-      pos.forEach((po, i) => {
-        const poNameCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}">
-          <div style="font-weight:600;color:var(--txt);font-size:12px">${po.summary}</div>
-          <div style="font-size:10px;color:#60a5fa;margin-top:2px">${po.key}</div>
-        </td>`;
-        const poStatCell = `<td style="padding:10px 14px;vertical-align:middle;${br};${bd}">${poBadge(po.status)}</td>`;
-        if (i === 0) {
-          rows += `<tr onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">
-            ${soCell}${soStatCell}${soQtyCell}${soAmrCell}${poNameCell}${poStatCell}${confCell}</tr>`;
-        } else {
-          rows += `<tr onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">
-            ${poNameCell}${poStatCell}</tr>`;
-        }
-      });
-    }
-  }
-  tbody.innerHTML = rows;
+  if (secActive)   secActive.innerHTML   = active.length   ? sectionHeader('Active',   active.length,   '#60a5fa') : '';
+  if (bodyActive)  bodyActive.innerHTML  = buildRows(active);
+  if (secArchived) secArchived.innerHTML = archived.length ? sectionHeader('Archived', archived.length, '#6b7280') : '';
+  if (bodyArchived)bodyArchived.innerHTML= buildRows(archived);
 }
 
 </script>
