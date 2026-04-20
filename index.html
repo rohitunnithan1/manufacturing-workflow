@@ -1578,11 +1578,21 @@ function renderWeeklyDispatch() {
     return dt;
   }
 
+  // Use local date string (not toISOString which converts to UTC and breaks in IST/other TZs)
+  const localDateStr = d => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${day}`;
+  };
+
   const todayD = new Date(); todayD.setHours(0,0,0,0);
-  const thisMonday = getMonday(todayD.toISOString().slice(0,10));
+  const thisMonday = getMonday(localDateStr(todayD));
+  const thisMondayStr = localDateStr(thisMonday);
   const thisSunday = new Date(thisMonday); thisSunday.setDate(thisSunday.getDate() + 6);
 
-  const fmtDate = d => d.toLocaleDateString('en-IN', {day:'2-digit', month:'short'});
+  const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtDate = d => `${String(d.getDate()).padStart(2,'0')} ${MONTH_SHORT[d.getMonth()]}`;
   const fmtSun  = d => { const s = new Date(d); s.setDate(s.getDate()+6); return fmtDate(s); };
 
   // ── ACTIVE weeks: current + future (excludes Done/Dispatch) ──────────────
@@ -1599,9 +1609,10 @@ function renderWeeklyDispatch() {
   }).forEach(b => {
     const raw = b.dueDate && b.dueDate !== 'PO Date Missing' ? b.dueDate : b.dispatchPlan + '-01';
     const mon = getMonday(raw);
-    // Overdue: due date is before this week → bump to THIS week, mark overdue
-    const isOverdue = mon < thisMonday;
-    const weekKey = isOverdue ? thisMonday.toISOString().slice(0,10) : mon.toISOString().slice(0,10);
+    const monStr = localDateStr(mon);
+    // Overdue: due date week is before this week → bump to THIS week, mark overdue
+    const isOverdue = monStr < thisMondayStr;
+    const weekKey = isOverdue ? thisMondayStr : monStr;
     if (!activeWeeks[weekKey]) activeWeeks[weekKey] = { monday: new Date(weekKey+'T00:00:00'), overdue:[], normal:[] };
     if (isOverdue) activeWeeks[weekKey].overdue.push(b);
     else           activeWeeks[weekKey].normal.push(b);
@@ -1619,8 +1630,9 @@ function renderWeeklyDispatch() {
     const raw = b.dispatchActual || b.dueDate;
     if (!raw || raw === 'PO Date Missing') return;
     const mon = getMonday(raw);
-    if (mon >= thisMonday) return; // don't show completed in future weeks
-    const weekKey = mon.toISOString().slice(0,10);
+    const monStr = localDateStr(mon);
+    if (monStr >= thisMondayStr) return; // don't show completed in future/current weeks
+    const weekKey = monStr;
     if (!pastWeeks[weekKey]) pastWeeks[weekKey] = { monday: new Date(weekKey+'T00:00:00'), completed:[] };
     pastWeeks[weekKey].completed.push(b);
   });
@@ -1644,8 +1656,8 @@ function renderWeeklyDispatch() {
   el.innerHTML = `<div style="display:flex;align-items:flex-end;gap:10px;min-height:${BAR_MAX_H+90}px;padding:4px 4px 0;overflow-x:auto">
     ${allKeys.map(key => {
       const monday  = new Date(key+'T00:00:00');
-      const isPast    = key < thisMonday.toISOString().slice(0,10);
-      const isCurrent = key === thisMonday.toISOString().slice(0,10);
+      const isPast    = key < thisMondayStr;
+      const isCurrent = key === thisMondayStr;
       const a = activeWeeks[key] || { overdue:[], normal:[] };
       const p = pastWeeks[key]   || { completed:[] };
 
